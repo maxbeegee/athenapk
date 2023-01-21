@@ -14,6 +14,7 @@
 
 // Parthenon headers
 #include "basic_types.hpp"
+#include "globals.hpp"
 #include "kokkos_abstraction.hpp"
 #include "mesh/mesh.hpp"
 #include <iomanip>
@@ -25,6 +26,7 @@
 #include <string>
 
 // AthenaPK headers
+#include "../hydro/srcterms/tabular_cooling.hpp"
 #include "../main.hpp"
 #include "../units.hpp"
 
@@ -471,6 +473,25 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
               0.5 * (SQR(u(IB1, k, j, i)) + SQR(u(IB2, k, j, i)) + SQR(u(IB3, k, j, i)));
         }
       });
+
+  const auto &enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  if (enable_cooling == Cooling::tabular) {
+    const auto &tabular_cooling =
+        hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling");
+    // The below does not work since rho = pres = 0 for md
+    auto min_cooling_time = tabular_cooling.EstimateTimeStep(md, true);
+#ifdef MPI_PARALLEL
+    PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, &min_cooling_time, 1,
+                                      MPI_PARTHENON_REAL, MPI_MIN, MPI_COMM_WORLD));
+#endif // MPI_PARALLEL
+    if (parthenon::Globals::my_rank == 0) {
+      std::cout << "[turbulence] Initial mininum cooling time: " << min_cooling_time
+                << " [code_units]\n";
+
+      std::cout << "[turbulence] Initial t_cool,hot = "
+                 << tabular_cooling.CoolingTime(rho0, p0) << "[code units]\n";
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -641,6 +662,9 @@ void Perturb(MeshData<Real> *md, const Real dt) {
   auto cons_pack = md->PackVariables(std::vector<std::string>{"cons"});
   auto acc_pack = md->PackVariables(std::vector<std::string>{"acc"});
 
+  const auto accel_rms = hydro_pkg->Param<Real>("turbulence/accel_rms");
+  if (accel_rms <= 0) return;
+
   Kokkos::Array<Real, 4> sums{{0.0, 0.0, 0.0, 0.0}};
   Kokkos::parallel_reduce(
       "forcing: calc mean momenum",
@@ -684,7 +708,6 @@ void Perturb(MeshData<Real> *md, const Real dt) {
   const auto Lx = pmb->pmy_mesh->mesh_size.x1max - pmb->pmy_mesh->mesh_size.x1min;
   const auto Ly = pmb->pmy_mesh->mesh_size.x2max - pmb->pmy_mesh->mesh_size.x2min;
   const auto Lz = pmb->pmy_mesh->mesh_size.x3max - pmb->pmy_mesh->mesh_size.x3min;
-  const auto accel_rms = hydro_pkg->Param<Real>("turbulence/accel_rms");
   auto norm = accel_rms / std::sqrt(sums[0] / (Lx * Ly * Lz));
 
   pmb->par_for(

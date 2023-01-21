@@ -118,6 +118,9 @@ class TabularCooling {
   // Temperature floor (assumed in Kelvin and only used in cooling function)
   parthenon::Real T_floor_;
 
+  // Heating rate
+  parthenon::Real heating_;
+
   // Maximum number of iterations/subcycles
   unsigned int max_iter_;
 
@@ -203,7 +206,11 @@ class TabularCooling {
                                  const parthenon::Real dt,
                                  const RKStepper rk_stepper) const;
 
-  parthenon::Real EstimateTimeStep(parthenon::MeshData<parthenon::Real> *md) const;
+  parthenon::Real EstimateTimeStep(parthenon::MeshData<parthenon::Real> *md,
+                                   bool force_return_tcool = false) const;
+
+  parthenon::Real CoolingTime(const parthenon::Real rho,
+                              const parthenon::Real pressure) const;
 
   void TestCoolingTable(parthenon::ParameterInput *pin) const;
 };
