@@ -47,7 +47,7 @@ std::uniform_real_distribution<> dist(-1.0, 1.0);
 
 // TODO(?) until we are able to process multiple variables in a single hst function call
 // we'll use this enum to identify the various vars.
-enum class HstQuan { Ms, Ma, pb };
+enum class HstQuan { Ms, Ma, pb, mcold };
 
 // Compute the local sum of either the sonic Mach number,
 // alfvenic Mach number, or plasma beta as specified by `hst_quan`.
@@ -82,9 +82,14 @@ Real TurbulenceHst(MeshData<Real> *md) {
             std::sqrt(gamma * prim(IPR, k, j, i) / prim(IDN, k, j, i)); // speed of sound
 
         const auto e_kin = 0.5 * prim(IDN, k, j, i) * vel2;
+        const auto eint = prim(IPR, k, j, i) / prim(IDN, k, j, i);
 
         if (hst_quan == HstQuan::Ms) { // Ms
           lsum += std::sqrt(vel2) / c_s * coords.CellVolume(k, j, i);
+        } else if (hst_quan == HstQuan::mcold) {
+          // This hard coded conversion to code units obviously needs fixing
+          if (eint < 2e4 * 1.44 / 1e6)
+            lsum += prim(IDN, k, j, i) * coords.CellVolume(k, j, i);
         }
 
         if (fluid == Fluid::glmmhd) {
@@ -107,12 +112,16 @@ Real TurbulenceHst(MeshData<Real> *md) {
 }
 
 void ProblemInitPackageData(ParameterInput *pin, parthenon::StateDescriptor *pkg) {
+  Units units(pin);
   // Step 1. Enlist history output information
   auto hst_vars = pkg->Param<parthenon::HstVar_list>(parthenon::hist_param_key);
   const auto fluid = pkg->Param<Fluid>("fluid");
 
   hst_vars.emplace_back(parthenon::HistoryOutputVar(parthenon::UserHistoryOperation::sum,
                                                     TurbulenceHst<HstQuan::Ms>, "Ms"));
+  hst_vars.emplace_back(parthenon::HistoryOutputVar(
+      parthenon::UserHistoryOperation::sum, TurbulenceHst<HstQuan::mcold>, "mcold"));
+
   if (fluid == Fluid::glmmhd) {
     hst_vars.emplace_back(parthenon::HistoryOutputVar(
         parthenon::UserHistoryOperation::sum, TurbulenceHst<HstQuan::Ma>, "Ma"));
@@ -489,7 +498,7 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
                 << " [code_units]\n";
 
       std::cout << "[turbulence] Initial t_cool,hot = "
-                 << tabular_cooling.CoolingTime(rho0, p0) << "[code units]\n";
+                << tabular_cooling.CoolingTime(rho0, p0) << "[code units]\n";
     }
   }
 }
