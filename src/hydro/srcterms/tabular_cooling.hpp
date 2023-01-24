@@ -85,6 +85,7 @@ struct RK45Stepper {
 };
 
 enum class CoolIntegrator { undefined, rk12, rk45, mixed, townsend };
+enum class HeatingMode { density, volumetric, cooled };
 
 class TabularCooling {
  private:
@@ -118,6 +119,7 @@ class TabularCooling {
   // Temperature floor (assumed in Kelvin and only used in cooling function)
   parthenon::Real T_floor_;
 
+  HeatingMode heating_mode_;
   // Heating rate
   parthenon::Real heating_;
 

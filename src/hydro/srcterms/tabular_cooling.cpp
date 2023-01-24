@@ -67,12 +67,27 @@ TabularCooling::TabularCooling(ParameterInput *pin) {
   // negative means disabled
   T_floor_ = pin->GetOrAddReal("hydro", "Tfloor", -1.0);
 
-  // Heating is defined as lambda_units (and the cm^3 in code units) to be able to match a
-  // cooling rate easily
-  heating_ = pin->GetOrAddReal("cooling", "heating", 0.) / lambda_units;
+  const auto heating_str = pin->GetOrAddString("cooling", "heating_mode", "density");
+  heating_ = pin->GetOrAddReal("cooling", "heating", 0.);
 
-  std::cout << "[cool] Heating. heating = " << heating_
-            << ", lambda_units = " << lambda_units << "\n";
+  if (heating_str == "density" || heating_str == "volumetric") {
+    if (heating_str == "density")
+      heating_mode_ = HeatingMode::density;
+    else
+      heating_mode_ = HeatingMode::volumetric;
+    // Heating is defined as lambda_units (and the cm^3 in code units) to be able to match
+    // a cooling rate easily
+    heating_ /= lambda_units;
+    if (parthenon::Globals::my_rank == 0) {
+      std::cout << "[cool] Heating. heating = " << heating_
+                << ", lambda_units = " << lambda_units << "\n";
+    }
+  } else if (heating_str == "cooled") {
+    heating_mode_ = HeatingMode::cooled;
+    if (parthenon::Globals::my_rank == 0) {
+      std::cout << "[cool] Heating fraction of " << heating_ << " what has cooled.";
+    }
+  }
   std::stringstream msg;
 
   /****************************************
@@ -624,11 +639,15 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
   const auto temp_final = std::pow(10.0, log_temp_final_);
   const auto lambda_final = lambda_final_;
   const auto heating = heating_;
+  const auto heating_mode = heating_mode_;
 
-  par_for(
+  Real sum_ecooled;
+
+  par_reduce(
       DEFAULT_LOOP_PATTERN, "TabularCooling::TownsendSrcTerm", DevExecSpace(), 0,
       cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
-      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
+      KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i,
+                    Real &lsum_ecooled) {
         auto &cons = cons_pack(b);
         auto &prim = prim_pack(b);
         // Need to use `cons` here as prim may still contain state at t_0;
@@ -648,8 +667,13 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
         auto temp_old = mu_m_u_gm1_by_k_B * internal_e;
 
         // Heating
-        auto e_heat = heating * dt; // propto rho
-        // auto e_heat = heating * dt / rho;   // volumetric
+        auto e_heat = 0.0;
+        if (heating_mode == HeatingMode::volumetric) {
+          e_heat = heating * dt / rho; // volumetric
+        } else if (heating_mode == HeatingMode::density) {
+          e_heat = heating * dt; // propto rho
+        }
+
         internal_e += e_heat;
         cons(IEN, k, j, i) += rho * e_heat;
 
@@ -710,7 +734,8 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
         // Cooling output
         /*
         if (i == ib.s && j == jb.s && k == kb.s) {
-          printf("[cool] (%d,%d,%d) T = %.2e->%.2e->%.2e, rho = %.2g, e_cool = %e, e_heat "
+          printf("[cool] (%d,%d,%d) T = %.2e->%.2e->%.2e, rho = %.2g, e_cool = %e, e_heat
+        "
                  "= %e, De = %e\n",
                  i, j, k, temp_old, temp, temp_new, rho, internal_e_new - internal_e,
                  e_heat, internal_e_new - (internal_e - e_heat));
@@ -721,7 +746,27 @@ void TabularCooling::TownsendSrcTerm(parthenon::MeshData<parthenon::Real> *md,
         // Latter technically not required if no other tasks follows before
         // ConservedToPrim conversion, but keeping it for now (better safe than sorry).
         prim(IPR, k, j, i) = rho * internal_e_new * gm1;
-      });
+
+        // Sum up how much cooling happens, not sure how this gets communicated...?
+        lsum_ecooled += rho * (internal_e_new - internal_e);
+      },
+      sum_ecooled);
+
+  if (heating_mode == HeatingMode::cooled) {
+    // MG: TODO This needs fixing (can be changed to propto density, too, e.g.)
+    const auto heat = heating * sum_ecooled / ((kb.e - kb.s) * (jb.e - jb.s) * (ib.e - ib.s));
+    par_for(
+        DEFAULT_LOOP_PATTERN, "TabularCooling::TownsendSrcTerm", DevExecSpace(), 0,
+        cons_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int &b, const int &k, const int &j, const int &i) {
+          auto &cons = cons_pack(b);
+          auto &prim = prim_pack(b);
+          const auto rho = cons(IDN, k, j, i);
+
+          cons(IEN, k, j, i) += heat;
+          prim(IPR, k, j, i) += heat * gm1; // check, is this correct?
+        });
+  }
 }
 
 Real TabularCooling::EstimateTimeStep(MeshData<Real> *md, bool force_return_tcool) const {

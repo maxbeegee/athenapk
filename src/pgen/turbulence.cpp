@@ -484,10 +484,12 @@ void ProblemGenerator(Mesh *pmesh, ParameterInput *pin, MeshData<Real> *md) {
       });
 
   const auto &enable_cooling = hydro_pkg->Param<Cooling>("enable_cooling");
+  
   if (enable_cooling == Cooling::tabular) {
     const auto &tabular_cooling =
         hydro_pkg->Param<cooling::TabularCooling>("tabular_cooling");
-    // The below does not work since rho = pres = 0 for md
+    // Need to update prim variables before estimating tcool
+    hydro_pkg->FillDerivedMesh(md);
     auto min_cooling_time = tabular_cooling.EstimateTimeStep(md, true);
 #ifdef MPI_PARALLEL
     PARTHENON_MPI_CHECK(MPI_Allreduce(MPI_IN_PLACE, &min_cooling_time, 1,
